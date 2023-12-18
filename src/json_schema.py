@@ -136,6 +136,7 @@ def _build_record(sample) -> rg.FeedbackRecord:
     response1 = _render_json_in_markdown(sample["generations"][0])
     response2 = _render_json_in_markdown(sample["generations"][1])
     json_schema = _render_json_in_markdown(sample["json_schema"])
+    prompt = prompt.replace(sample["json_schema"], json_schema)
     suggestions = []
     for response_name, validity in sample["schema"].items():
         if validity:
@@ -144,7 +145,6 @@ def _build_record(sample) -> rg.FeedbackRecord:
     return rg.FeedbackRecord(
         fields={
             "prompt": prompt,
-            "json_schema": json_schema,
             "response1": response1,
             "response2": response2,
         },
