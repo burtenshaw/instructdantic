@@ -1,8 +1,10 @@
+import os
+
 import argilla as rg
-from datasets import Dataset
 
-
-rg.init(api_url="https://burtenshaw-argilla-latest.hf.space", api_key="admin.apikey")
+API_URL = os.getenv("ARGILLA_API_URL")
+API_KEY = os.getenv("ARGILLA_API_KEY")
+rg.init(api_url=API_URL, api_key=API_KEY)
 
 
 def pull_argilla_dataset(
