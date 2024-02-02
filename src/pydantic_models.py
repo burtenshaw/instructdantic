@@ -7,11 +7,12 @@ from argilla.client.feedback.schemas.records import SuggestionSchema
 from datasets import Dataset
 from distilabel.llm import OpenAILLM
 from distilabel.pipeline import Pipeline
-from distilabel.tasks import OpenAITextGenerationTask
+from distilabel.tasks import TextGenerationTask
 from guardrails.validators import BugFreePython
 
+from src.utils import log_input_generations
 
-class PydanticOpenAITextGenerationTask(OpenAITextGenerationTask):
+class PydanticGenerationTask(TextGenerationTask):
 
     """A task that generates running python code that defines a pydantic class."""
 
@@ -87,8 +88,7 @@ class PydanticOpenAITextGenerationTask(OpenAITextGenerationTask):
 
 
 def generate_pydantic_models(
-    use_cases: list[str],
-    use_case_prefix: str = "Define a pydantic class called UseCase for this use case:",
+    use_case_dataset: Dataset,
 ):
     """Generates pydantic models for a list of use cases.
     Args:
@@ -97,7 +97,15 @@ def generate_pydantic_models(
     Returns:
         Dataset: A dataset of generated pydantic models.
     """
-
+    use_case_dataset = use_case_dataset.rename_column(
+        original_column_name="input", new_column_name="pydantic_usecase_input"
+    )
+    use_case_dataset = use_case_dataset.rename_column(
+        original_column_name="raw_generation_responses", new_column_name="input"
+    )
+    use_case_dataset_df = use_case_dataset.to_pandas()
+    use_case_dataset_df = use_case_dataset_df.explode("input")
+    use_case_dataset = Dataset.from_pandas(use_case_dataset_df)
     system_prompt: str = (
         "You are an expert python developer, specialising in pydantic classes."
         "You are given a use case for a specific application entity."
@@ -106,14 +114,17 @@ def generate_pydantic_models(
         "You do not write code that is not valid python."
         "You do not explain or describe the code you generate."
     )
-    use_cases = [f"{use_case_prefix} {use_case}" for use_case in use_cases]
-    dataset = Dataset.from_dict({"input": use_cases})
-    task = PydanticOpenAITextGenerationTask(system_prompt=system_prompt)
+    task = PydanticGenerationTask(system_prompt=system_prompt)
     instruction_generator = OpenAILLM(
         task=task, num_threads=4, max_new_tokens=1024, model="gpt-4"
     )
     pipeline = Pipeline(generator=instruction_generator)
-    distiset = pipeline.generate(dataset=dataset, num_generations=1, batch_size=2)
+    distiset = pipeline.generate(dataset=use_case_dataset, num_generations=1, batch_size=2)
+    log_input_generations(
+        inputs=distiset[0]["input"],
+        generations=distiset[0]["generation"],
+        message="Generated Pydantic models for the following use cases:",
+    )
     return distiset
 
 
@@ -132,10 +143,7 @@ def push_pydantic_to_argilla(pipeline_dataset, argilla_dataset_name: str | None 
     else:
         feedback_dataset = rg.FeedbackDataset(
             fields=[
-                rg.TextField(name="instruction", required=True),
                 rg.TextField(name="code", required=True, use_markdown=True),
-                rg.TextField(name="json_schema", required=True, use_markdown=True),
-                rg.TextField(name="generation", required=True, use_markdown=True),
             ],
             questions=[
                 rg.LabelQuestion(
@@ -144,10 +152,13 @@ def push_pydantic_to_argilla(pipeline_dataset, argilla_dataset_name: str | None 
                     labels=["Yes", "No"],
                     required=True,
                 ),
-                rg.TextQuestion(name="usecase_class"),
             ],
         )
-    records = list(map(_build_record, pipeline_dataset))
+    records = []
+    for sample in pipeline_dataset:
+        for code in sample["code"]:
+            record = _build_record(code, sample["valid"])
+            records.append(record)
     feedback_dataset.add_records(records=records)
     remote_dataset = feedback_dataset.push_to_argilla(
         name=f"json-response-feedback-{uuid4()}", workspace="admin"
@@ -155,29 +166,23 @@ def push_pydantic_to_argilla(pipeline_dataset, argilla_dataset_name: str | None 
     return remote_dataset
 
 
-def _build_record(sample) -> rg.FeedbackRecord:
+def _build_record(
+        code: str,
+        valid: bool,
+    ) -> rg.FeedbackRecord:
     """Builds a feedback record for a generated pydantic model.
     Args:
         sample (dict[str, Any]): A generated pydantic model.
     Returns:
         FeedbackRecord: A feedback record for a generated pydantic model.
     """
-    instruction = sample["input"]
-    code = "".join(sample["code"])
     code = f"""```python\n{code}\n```"""
-    json_schema = "".join(sample["json_schema"])
-    generation = "".join(sample["generation"])
-    valid = "Yes" if sample["valid"] else "No"
-    usecase_class = "UseCase"
+    valid = "Yes" if valid else "No"
     record = rg.FeedbackRecord(
         fields={
-            "instruction": instruction,
             "code": code,
-            "json_schema": json_schema,
-            "generation": generation,
         },
         suggestions=[
-            SuggestionSchema(question_name="usecase_class", value=usecase_class),
             SuggestionSchema(question_name="valid", value=valid),
         ],
         metadata={"valid": valid},

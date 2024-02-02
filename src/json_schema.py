@@ -7,10 +7,14 @@ from distilabel.pipeline import Pipeline
 from distilabel.tasks import TextGenerationTask
 from jsonschema import validate
 
-from src import utils
+from src.utils import log_input_generations
 
 
-def generate_and_push_dpo_dataset(dataset):
+def generate_json_dataset(
+        dataset,
+        num_generations: int = 5,
+        batch_size: int = 5,
+        ):
     """Generate a dataset for DPO based on the Pydantic dataset. This time we want
         to train a model to generate JSON schemas based on use cases.
         Args:
@@ -34,12 +38,77 @@ def generate_and_push_dpo_dataset(dataset):
             temperature=0.0,
         )
     )
-    generated_dataset = pipeline.generate(
-        dataset=dataset, num_generations=5, batch_size=5, display_progress_bar=True
+    dataset = dataset.rename_column(
+        original_column_name="code", new_column_name="input"
     )
+    generated_dataset = pipeline.generate(
+        dataset=dataset, num_generations=num_generations, batch_size=batch_size, display_progress_bar=True
+    )
+    log_input_generations(
+        inputs=generated_dataset[0]["input"],
+        generations=generated_dataset[0]["generations"],
+        message="Generated JSON schemas for the following Pydantic models:",
+    )
+    return generated_dataset
 
-    generated_dataset = generated_dataset.map(validate_response_json_schema)
 
+def generate_usecase_inputs(
+        dataset,
+        num_generations: int = 5,
+        batch_size: int = 5,
+        ):
+    """Generate a dataset for DPO based on JSON Schema. This time we want
+        to generate a use case that require the json schema.
+        Args:
+            dataset (Dataset): The datasets dataset.
+        Returns:
+            dataset: The dataset with a usecase input field.
+    """
+    generator_system_prompt = (
+        "You an expert prompt engineer."
+        "you are given a JSON schema for the entity of a use case."
+        "Your task is to write a prompt for the use case that requires a json object in response."
+        "Write an unstructured text prompt that that expects a json object."
+        "The prompt should not contain the json schema itself."
+        "The prompt should contain all the information required to generate the json object."
+    )
+    pipeline = Pipeline(
+        generator=OpenAILLM(
+            model="gpt-4",
+            task=TextGenerationTask(system_prompt=generator_system_prompt),
+            prompt_format="openai",
+            max_new_tokens=1024,
+            num_threads=1,
+            temperature=0.5,
+        )
+    )
+    dataset = dataset.rename_column(
+        original_column_name="generations", new_column_name="jsonschema_generations"
+    )
+    dataset = dataset.rename_column(
+        original_column_name="input", new_column_name="jsonschema_input"
+    )
+    dataset = dataset.rename_column(
+        original_column_name="json_schema", new_column_name="input"
+    )
+    generated_dataset = pipeline.generate(
+        dataset=dataset, num_generations=num_generations, batch_size=batch_size, display_progress_bar=True
+    )
+    log_input_generations(
+        inputs=dataset[0]["input"],
+        generations=dataset[0]["generation"],
+        message="Generated use cases for the following json schema:",
+    )
+    return generated_dataset
+
+
+def push_dpo_dataset_to_argilla(generated_dataset):
+    records = []
+    for sample in generated_dataset:
+        for generation in sample["generations"]:
+            sample["input"] = generation
+            record = _build_record(sample)
+            records.append(record)
     feedback_dataset = rg.FeedbackDataset.for_direct_preference_optimization(
         number_of_responses=2,
         context=False,
@@ -48,8 +117,6 @@ def generate_and_push_dpo_dataset(dataset):
         metadata_properties=None,
         vectors_settings=None,
     )
-
-    records = [_build_record(sample) for sample in generated_dataset]
     feedback_dataset.add_records(records)
     remote_dataset = feedback_dataset.push_to_argilla(
         name=f"json-response-dpo-{uuid4()}", workspace="admin"
@@ -69,17 +136,12 @@ def pull_convert_to_datasets(feedback_dataset: "RemoteFeedbackDataset") -> Datas
 
     def convert(record):
         sample = {
-            "instruction": record.fields["instruction"],
             "code": record.fields["code"],
-            "json_schema": record.fields["json_schema"],
-            "generation": record.fields["generation"],
         }
         responses = {
             key: value.value for key, value in record.responses[0].values.items()
         }
         sample.update(responses)
-        use_case_prefix = "Define a pydantic class called UseCase for this use case:"
-        sample["instruction"] = sample["instruction"].replace(use_case_prefix, "")
         sample["code"] = sample["code"].replace("```python\n", "").replace("\n```", "")
         return sample
 
@@ -102,32 +164,9 @@ def execute_generated_pydantic_models(sample):
     except Exception as e:
         json_schema = str(e)
         validity = 0
-    instruction = sample["instruction"]
-    sample["input"] = f"{instruction}\nOutput Structure:\n{json_schema}"
     sample["json_schema"] = json_schema
     sample["valid_json_schema"] = validity
     return sample
-
-
-def validate_response_json_schema(sample) -> dict[str, dict[str, bool]]:
-    """Validates the generated JSON schema."""
-    json_schema = sample["input"].split("\nOutput Structure:\n")[1]
-    response1 = sample["generations"][0]
-    response2 = sample["generations"][1]
-
-    def valid_json_schema(json_object):
-        try:
-            validate(instance=eval(json_object), schema=eval(json_schema))
-            return True
-        except Exception as e:
-            return False
-
-    return {
-        "schema": {
-            "response1": valid_json_schema(response1),
-            "response2": valid_json_schema(response2),
-        }
-    }
 
 
 def _build_record(sample) -> rg.FeedbackRecord:

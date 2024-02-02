@@ -4,10 +4,14 @@ from datasets import Dataset
 from distilabel.llm import OpenAILLM
 from distilabel.pipeline import Pipeline
 from distilabel.tasks import SelfInstructTask
+from dotenv import load_dotenv
 
+from src.utils import log_input_generations
+
+load_dotenv()
 
 def generate_prompts(
-    num_generations: int = 1,
+    n_generations: int = 1,
     batch_size: int = 2,
     max_new_tokens: int = 1024,
     num_threads: int = 4,
@@ -61,9 +65,15 @@ def generate_prompts(
     )
     pipeline = Pipeline(generator=instruction_generator)
     distiset = pipeline.generate(
-        dataset=use_case_dataset, num_generations=num_generations, batch_size=batch_size
+        dataset=use_case_dataset, num_generations=n_generations, batch_size=batch_size
     )
-    generated_use_case_prompts = list(
-        chain.from_iterable(chain.from_iterable(distiset["generations"]))
+    # get a sample and log it clearly
+    prompt_samples = [sample["generation_prompt"][0][1]["content"] for sample in distiset]
+    input_samples = [sample["input"] for sample in distiset]
+    log_input_generations(
+        inputs=input_samples,
+        generations=prompt_samples,
+        message="Generated promps for the following use cases:",
     )
-    return generated_use_case_prompts
+    return distiset
+
