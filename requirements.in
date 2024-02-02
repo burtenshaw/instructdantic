@@ -5,3 +5,7 @@ jsonschema
 guardrails-ai
 python-dotenv
 rich
+langchain
+langchain_openai
+langchain_experimental
+langchainhub
